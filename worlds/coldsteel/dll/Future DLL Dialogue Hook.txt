@@ -1,0 +1,71 @@
+#include <windows.h>
+#include <string>
+
+const LPCWSTR SHARED_MEM_NAME = L"ColdSteelSharedMessage";
+const int SHARED_MEM_SIZE = 256;
+
+char* sharedBuffer = nullptr;
+HANDLE hMapFile = NULL;
+
+// Original hook location and return address
+unsigned char* hookLocation = (unsigned char*)0x656A00;
+DWORD returnAddress = 0x656A06;
+
+// Default message buffer
+char lastMessage[SHARED_MEM_SIZE] = "";
+
+// Hook target
+__declspec(naked) void injectMessage()
+{
+    __asm {
+        pushad
+        pushfd
+    }
+
+    if (sharedBuffer && strlen(sharedBuffer) > 0 && strcmp(sharedBuffer, lastMessage) != 0) {
+        // Prepare full voiced message format: header + payload + footer
+        unsigned char voicedDialog[256] = {
+            0x11, 0x9C, 0xC7, 0x00, 0x00 // header
+        };
+        size_t len = strlen(sharedBuffer);
+        memcpy(voicedDialog + 5, sharedBuffer, len);
+        voicedDialog[5 + len] = 0x02;  // end marker
+        voicedDialog[6 + len] = 0x00;
+        voicedDialog[7 + len] = 0x1C;
+        voicedDialog[8 + len] = 0x1A;
+        voicedDialog[9 + len] = 0xE9;
+        voicedDialog[10 + len] = 0x03;
+
+        // Replace ESI with pointer to our dialog
+        __asm {
+            lea esi, voicedDialog
+            mov [ebp - 4], esi
+        }
+        strcpy_s(lastMessage, sharedBuffer); // remember last message shown
+    }
+
+    __asm {
+        popfd
+        popad
+        jmp returnAddress
+    }
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+{
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        // Set up shared memory connection
+        hMapFile = OpenFileMapping(FILE_MAP_READ, FALSE, SHARED_MEM_NAME);
+        if (hMapFile != NULL) {
+            sharedBuffer = (char*)MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, SHARED_MEM_SIZE);
+        }
+
+        // Hook injection
+        DWORD oldProtect;
+        VirtualProtect(hookLocation, 6, PAGE_EXECUTE_READWRITE, &oldProtect);
+        *hookLocation = 0xE9;
+        *(DWORD*)(hookLocation + 1) = (DWORD)&injectMessage - ((DWORD)hookLocation + 5);
+        *(hookLocation + 5) = 0x90;
+    }
+    return TRUE;
+}
